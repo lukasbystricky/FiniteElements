@@ -1,0 +1,65 @@
+# Listing of Parameters
+# ---------------------
+subsection Fluid constants
+  # kinematic viscosity
+  set nu = 1
+end
+
+
+subsection Output options
+  # name of the output file (without extension)
+  set output name  = navier_stokes_convergence
+
+  # print errors to console. If exact solution known and in myfunctions.h,
+  # print L2 and H1 errors. For uniform mesh refinement this is essentially a
+  # convergence study. For adaptive mesh refinement, errors are calcualated
+  # after each adpat.
+  set print errors = true
+  
+  # verbose output to console during solve
+  set verbose      = true
+end
+
+
+subsection Problem setup
+
+  # gmesh file, if none availiable enter 'auto'
+  set mesh file = auto
+  
+  # height of rectangular domain
+  set height   = 1
+
+  # length of rectangular domain
+  set length   = 1
+  
+  # number of nodes in x direction
+  set nx       = 5
+
+  # number of nodes in y direction
+  set ny       = 5
+
+  # normal stress at inlet (specify if pressure induced)
+  set r inlet  = -20
+
+  # normal stress at outlet (specify if pressure induced)
+  set r outlet = 0
+end
+
+
+subsection Run options
+
+  # maximum cell refinement level
+  set maximum refinement level = 3        # default: 3
+
+  # minimum cell refinement level
+  set minimum refinement level = 0
+
+  # refinement steps
+  set refinement steps = 4
+  
+  # refienment type (adaptive or uniform)
+  set refinement type          = uniform
+
+  # slit flow model, (true or false)
+  set slit flow                = false
+end
