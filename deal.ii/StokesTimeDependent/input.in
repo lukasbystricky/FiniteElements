@@ -1,0 +1,70 @@
+# Listing of Parameters
+# ---------------------
+subsection Fluid constants
+  # dynamic viscosity of the fluid
+  set mu = 1
+end
+
+
+subsection Output options
+  # name of the output file (without extension)
+  set output name  = stokes_flow
+
+  # print errors to console. If exact solution known and in myfunctions.h,
+  # print L2 and H1 errors. For uniform mesh refinement this is essentially a
+  # convergence study. For adaptive mesh refinement, errors are calcualated
+  # after each adpat.
+  set print errors = false       # default: true
+
+  # verbose output to console during solve
+  set verbose      = true
+end
+
+
+subsection Problem setup
+
+  set final time   = 1
+  
+  # height of rectangular domain
+  set height       = 1
+  
+  set initial time = 0
+
+  # length of rectangular domain
+  set length       = 1
+
+  # gmesh file, if none availiable enter 'auto'
+  set mesh file    = auto
+
+  # number of nodes in x direction
+  set nx           = 9       # default: 9
+
+  # number of nodes in y direction
+  set ny           = 9          # default: 9
+
+  # normal stress at inlet (specify if slit flow)
+  set r inlet      = -1e5
+
+  # normal stress at outlet (specify if slit flow)
+  set r outlet     = 0
+  
+  set time step    = 0.01       # default: 0.05
+end
+
+
+subsection Run options
+  # maximum cell refinement level
+  set maximum refinement level = 3       # default: 3
+
+  # minimum cell refinement level
+  set minimum refinement level = 0
+
+  # refienment type (adaptive or uniform)
+  set refinement type          = adaptive
+
+  # slit flow model, (true or false)
+  set slit flow                = false
+
+  # number of time steps per adaptive mesh refinement
+  set time steps per adapt     = 5
+end
