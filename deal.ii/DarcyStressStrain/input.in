@@ -1,0 +1,74 @@
+# Listing of Parameters
+# ---------------------
+
+# Poisson's ratio of the foam
+set Poisson's ratio  = 0.1
+
+# Young's modulus of the foam
+set Young's modulus  = 1e5
+
+# dynamic viscosity of the fluid (in Pa s)
+set mu               = 1e-1   # default: 0.1
+
+# pressure induced flow
+set pressure induced = true
+
+# normal stress at inlet (specify if pressure induced)
+set r inlet          = 1e5
+
+# normal stress at outlet (specify if pressure induced)
+set r outlet         = 9e4 # default: -1e4
+
+
+subsection Constants
+  # maximum void space radius (mm)
+  set max inner pore radius     = 0.03 # default: 1e-4
+
+  # maximum partial void space radius (mm)
+  set max outer pore radius     = 0.12 # default: 5e-4
+
+  # maximum porosity (must be < 1)
+  set max porosity              = 0.95
+
+  # minimum void space radius (mm)
+  set min inner pore radius     = 1e-3 # default: 1e-6
+
+  # minimum partial void space radius (mm)
+  set min outer pore radius     = 0.05 # default: 1.1e-4
+
+  # minimum porosity (must be > 0)
+  set min porosity              = 0.01
+
+  # number of pores
+  set number of pores           = 30  # default: 1
+
+  # coefficient a in k = a*phi^b
+  set permiability coefficent a = 2e-4 # default: 1
+
+  # coefficient b in k = a*phi^b
+  set permiability coefficent b = 2
+end
+
+
+subsection Geometry
+  # initial height of the foam (in mm)
+  set initial height = 1   # default: 4
+
+  # length of the foam (in mm)
+  set length         = 5   # default: 200
+
+  # number of mesh points along foam length
+  set nx             = 100 # default: 250
+
+  # number of mesh points along foam height
+  set ny             = 20 # default: 10
+end
+
+
+subsection Output options
+  # name of the output file (without extension)
+  set output name = foam_study # default: darcy_flow
+
+  # verbose output to console during solve
+  set verbose     = true
+end
