@@ -1,0 +1,56 @@
+# Listing of Parameters
+# ---------------------
+# dynamic viscosity of the fluid (in Pa s)
+set mu           = 1
+
+# average permiability (in mm)
+set permiability = 1
+
+# pressure induced flow
+set pressure induced = true
+
+# normal stress at inlet (specify if pressure induced)
+set r inlet          = -1e5
+
+# normal stress at outlet (specify if pressure induced)
+set r outlet         = -1e4
+
+
+subsection Geometry
+  # initial height of the foam (in mm)
+  set initial height = 1
+
+  # length of the foam (in mm)
+  set length         = 5
+
+  # number of mesh points along foam length
+  set nx             = 25
+
+  # number of mesh points along foam height
+  set ny             = 5
+end
+
+
+subsection Output options
+  # name of the output file (without extension)
+  set output name = darcy_flow
+
+  # verbose output to console during solve
+  set verbose     = true
+end
+
+
+subsection Run options
+  # adaptive meshing
+  set adaptive meshing             = true
+
+  # run convergence study
+  set convergence study            = false
+
+  # number of adaptive refinements to run
+  set number of adaptive cycles    = 1
+
+  # number of global refinements in convergence study
+  set number of convergence cycles = 3
+end
+
