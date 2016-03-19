@@ -6,34 +6,34 @@ set mu           = 1
 # average permiability (in mm)
 set permiability = 1
 
-# pressure induced flow
-set pressure induced = true
-
-# normal stress at inlet (specify if pressure induced)
-set r inlet          = -1e5
+# pressure at inlet (specify if pressure induced)
+set p inlet          = 0
 
 # normal stress at outlet (specify if pressure induced)
-set r outlet         = -1e4
+set p outlet         = 0
 
 
 subsection Geometry
+
+  # gmesh file, if none availiable enter 'auto'
+  set mesh file = auto
+
   # initial height of the foam (in mm)
-  set initial height = 1
+  set height = 1
 
   # length of the foam (in mm)
-  set length         = 5
+  set length         = 1
 
   # number of mesh points along foam length
-  set nx             = 25
+  set nx             = 5
 
   # number of mesh points along foam height
   set ny             = 5
 end
 
-
 subsection Output options
   # name of the output file (without extension)
-  set output name = darcy_flow
+  set output name = darcy_flow_convergence
 
   # verbose output to console during solve
   set verbose     = true
@@ -42,13 +42,13 @@ end
 
 subsection Run options
   # adaptive meshing
-  set adaptive meshing             = true
+  set adaptive meshing             = false
 
   # run convergence study
-  set convergence study            = false
+  set convergence study            = true
 
   # number of adaptive refinements to run
-  set number of adaptive cycles    = 1
+  set number of adaptive cycles    = 3
 
   # number of global refinements in convergence study
   set number of convergence cycles = 3
