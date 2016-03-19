@@ -17,10 +17,6 @@ class DarcyFlow
 		void assemble();
 		void solve();
 		void refine_grid();
-		void move_mesh();
-		void calculate_new_top_values();
-		double calculate_new_height();
-		Point<dim,double> update_vertex(Point <dim,double> old_vertex);
 		void output_results(int cycle);
         void calculate_error(int cycle);  
         void print_errors();      
@@ -38,25 +34,14 @@ class DarcyFlow
 		
 		ConvergenceTable	   velocity_convergence_table;
 		ConvergenceTable	   pressure_convergence_table;
-		bool pressure_induced;
 		bool verbose;
-		
-		struct PointComparator
-		{
-			bool operator()(const Point<dim> & left, const Point<dim> & right) const
-			{
-				return (left[0] > right[0]);
-			}
-		};
-		
-		std::map<Point<dim>, double, PointComparator>       new_domain_heights;
 };
 
 template<int dim>
 DarcyFlow<dim>::DarcyFlow():
 	//Raviart-Thomas elements for the velocity, 
-	//discontinous elements for the pressure
-    fe (FE_RaviartThomas<dim>(1), 1, FE_DGQ<dim>(1), 1)
+	//discontinous linear elements for the pressure
+    fe (FE_RaviartThomas<dim>(1), 1, FE_DGQ<dim>(1), 1),
     dof_handler(mesh)
 {}
 
@@ -68,20 +53,20 @@ void DarcyFlow<dim>::read_inputs()
 
 	prm.declare_entry("permiability", "1e-3", Patterns::Double(1e-7, 1),
 					"average permiability (in mm)");
-
-	prm.declare_entry("pressure induced", "true", Patterns::Bool(),
-					"pressure induced flow");
 					
-	prm.declare_entry("r inlet", "-1e5", Patterns::Double(-1e7, 1e7),
-					"normal stress at inlet (specify if pressure induced)");
+	prm.declare_entry("p inlet", "1e5", Patterns::Double(-1e7, 1e7),
+					"pressure at inlet");
 	
-	prm.declare_entry("r outlet", "-1e4", Patterns::Double(-1e7, 1e7),
-					"normal stress at outlet (specify if pressure induced)");
+	prm.declare_entry("p outlet", "1e4", Patterns::Double(-1e7, 1e7),
+					"pressure at outlet");
 									
 	prm.enter_subsection("Geometry");
 	{
-	  prm.declare_entry("initial height", "4", Patterns::Double(0.1, 100),
-						"initial height of the foam (in mm)");
+	  prm.declare_entry("mesh file", "auto", Patterns::Anything(),
+					"gmesh file, if none availiable enter 'auto'");
+					
+	  prm.declare_entry("height", "4", Patterns::Double(0.1, 100),
+						"height of the foam (in mm)");
 
 	  prm.declare_entry("length", "100", Patterns::Double(1, 100000), 
 						"length of the foam (in mm)");
@@ -128,19 +113,34 @@ void DarcyFlow<dim>::setup_geometry (int cycle)
 {  			
 	if (cycle == 0)
 	{
-		prm.enter_subsection("Geometry");
-		
-		std::vector<unsigned int> number_elements(2);
-		number_elements[0] = prm.get_integer("nx")-1;
-		number_elements[1] = prm.get_integer("ny")-1;
-  
-		Point<2> bottom_left (0,0);
-		Point<2> top_right (prm.get_double("length"), prm.get_double("initial height"));
-		
-		GridGenerator::subdivided_hyper_rectangle(mesh, number_elements,
-			bottom_left, top_right, false);
-			
+		prm.enter_subsection("Geometry");	 
+		std::string gmesh_file = prm.get("mesh file");
 		prm.leave_subsection();	
+		
+		if (gmesh_file.compare("auto") != 0)
+		{
+			mesh.clear();
+			GridIn<dim> grid_in;
+			grid_in.attach_triangulation(mesh);
+			std::ifstream input_file(gmesh_file.c_str());
+			grid_in.read_msh(input_file); 
+		}
+		else
+		{
+			prm.enter_subsection("Geometry");
+		
+			std::vector<unsigned int> number_elements(2);
+			number_elements[0] = prm.get_integer("nx")-1;
+			number_elements[1] = prm.get_integer("ny")-1;
+	  
+			Point<2> bottom_left (0,0);
+			Point<2> top_right (prm.get_double("length"), prm.get_double("height"));
+			
+			GridGenerator::subdivided_hyper_rectangle(mesh, number_elements,
+				bottom_left, top_right, false);
+				
+			prm.leave_subsection();	
+		}
 	}   	
 	
     dof_handler.distribute_dofs(fe);  
@@ -159,69 +159,47 @@ void DarcyFlow<dim>::setup_geometry (int cycle)
     std::vector<bool> boundary_dofs(dof_handler.n_dofs(), false);
     
 	prm.enter_subsection("Geometry");
-	double domain_height = prm.get_double("initial height");
 	double domain_length = prm.get_double("length");
 	prm.leave_subsection();
 		
     typename DoFHandler<dim>::active_cell_iterator  
 			cell = dof_handler.begin_active(), endc = dof_handler.end();
     
-    //set boundary labels:
-    // (1) : bottom/top
-    // (2) : inlet/outlet
+        //set boundary labels:
+    // (1) : top
+    // (2) : bottom
+    // (3) : inlet
+    // (4) : outlet
 	for (; cell!=endc; ++cell)
 	{
 		for (int f=0; f<GeometryInfo<dim>::faces_per_cell; f++)
 		{
 			if (cell->face(f)->at_boundary())
 			{
-				if ((fabs(cell->face(f)->center()[1]) < 1e-8) ||
-					(fabs(cell->face(f)->center()[1] - domain_height) < 1e-8))
+				if (fabs(cell->face(f)->center()[0]) < 1e-8)
 				{
-					cell->face(f)->set_boundary_indicator(1);
-				}				
-				if ((fabs(cell->face(f)->center()[0]) < 1e-8) ||
-					(fabs(cell->face(f)->center()[0] - domain_length) < 1e-8))
+					cell->face(f)->set_boundary_indicator(3);
+				}
+				else if (fabs(cell->face(f)->center()[0] - domain_length) < 1e-8)	
+				{
+					cell->face(f)->set_boundary_indicator(4);
+				}		
+				else if (fabs(cell->face(f)->center()[1]) < 1e-8)
 				{
 					cell->face(f)->set_boundary_indicator(2);
 				}
+				else
+				{
+					cell->face(f)->set_boundary_indicator(1);
+				}		
 			}
 		}
 	}		
-		
-	if (pressure_induced)
-	{
-		//apply velocity boundary conditions to top and bottom only
-		//set tangential (vertical) velocity at inlet and outlet
-		
-		FEValuesExtractors::Scalar velocity_y(1);
-		
-		VectorTools::interpolate_boundary_values(dof_handler, 1, 
-				*boundary_values, constraints, fe.component_mask(velocities));
-				
-		VectorTools::interpolate_boundary_values(dof_handler, 2, 
-				*boundary_values, constraints, fe.component_mask(velocity_y));
-		
-	}
-	else
-	{
-		//set Dirichlet boundary conditions on the velocity everywhere
-		
-		VectorTools::interpolate_boundary_values(dof_handler, 1, 
-				*boundary_values, constraints, fe.component_mask(velocities));
-		
-		VectorTools::interpolate_boundary_values(dof_handler, 2, 
-				*boundary_values, constraints, fe.component_mask(velocities));
-						
-		DoFTools::extract_boundary_dofs(dof_handler, fe.component_mask(pressure), 
-					boundary_dofs);
-					
-		const unsigned int first_boundary_dof = std::distance(boundary_dofs.begin(),
-			std::find (boundary_dofs.begin(), boundary_dofs.end(), true));
-			
-		constraints.add_line(first_boundary_dof);	
-	}
-
+	
+	//apply through boundary conditions on top and bottom	
+	VectorTools::project_boundary_values_div_conforming(dof_handler, 0, *boundary_values, 1, constraints);
+	VectorTools::project_boundary_values_div_conforming(dof_handler, 0, *boundary_values, 2, constraints);
+	
     constraints.close();
             
 	//calculate sparsity pattern 
@@ -296,7 +274,6 @@ void DarcyFlow<dim>::assemble()
 			
 			for (int k=0; k<dofs_per_cell; k++)
 			{
-				grad_phi_u[k] = fe_values[velocities].gradient (k, q);
 				div_phi_u[k]  = fe_values[velocities].divergence (k, q);
 				phi_p[k]      = fe_values[pressure].value (k, q);
 				phi_u[k]      = fe_values[velocities].value (k, q);
@@ -307,19 +284,16 @@ void DarcyFlow<dim>::assemble()
 				for (int j = 0; j < dofs_per_cell; j++)
 				{
 						cell_matrix(i,j) += 
-									((mu/2.0)*double_contract(grad_phi_u[j] + transpose(grad_phi_u[j]),grad_phi_u[i] + transpose(grad_phi_u[i]))
-											+ (mu/(fabs(kappa)))*phi_u[j]*phi_u[i]										
-											- phi_p[j]*div_phi_u[i]
-											- phi_p[i]*div_phi_u[j])
-											*fe_values.JxW(q);	
+								((mu/kappa)*phi_u[j]*phi_u[i]										
+									- phi_p[j]*div_phi_u[i]
+									- phi_p[i]*div_phi_u[j])
+												*fe_values.JxW(q);	
 												
 				}
 				
-				int equation_i = fe.system_to_component_index(i).first;					
-								
 				cell_rhs[i] += 
-							fe_values.shape_value(i,q)*rhs_values[q](equation_i)
-							*fe_values.JxW(q);	  
+							(phi_u[i][0]*rhs_values[q][0] + phi_u[i][1]*rhs_values[q][1])//no longer dimension independent
+								*fe_values.JxW(q);	  
 			}
 		}
 		
@@ -345,12 +319,12 @@ void DarcyFlow<dim>::assemble()
 					{							
 						if (fabs(x) < 1e-8)
 						{
-							cell_rhs[i] -= prm.get_double("r inlet")
+							cell_rhs[i] += prm.get_double("p inlet")
 									*phi_u[i][0]*fe_face_values.JxW(q_boundary);
 						}
 						else if (fabs(x - domain_length) < 1e-8)
 						{
-							cell_rhs[i] += prm.get_double("r outlet")
+							cell_rhs[i] -= prm.get_double("p outlet")
 									*phi_u[i][0]*fe_face_values.JxW(q_boundary);
 						}						
 					}
@@ -427,125 +401,6 @@ void DarcyFlow<dim>::refine_grid()
 }
 
 template<int dim>
-void DarcyFlow<dim>::move_mesh()
-{
-	if (verbose)
-	{
-		printf("Moving mesh...");
-	}
-	
-	calculate_new_top_values();
-	
-	std::vector<bool> hanging_dofs(dof_handler.n_dofs(), false);
-	DoFTools::extract_hanging_node_dofs(dof_handler, hanging_dofs);
-					
-	std::vector<bool> vertex_touched (mesh.n_vertices(), false);
-	typename DoFHandler<dim>::active_cell_iterator  
-			cell = dof_handler.begin_active(), endc = dof_handler.end();
-			
-	for (; cell!=endc; ++cell)
-	{
-		for (int v=0; v<GeometryInfo<dim>::vertices_per_cell; v++)
-		{
-			if (vertex_touched[cell->vertex_index(v)] == false)
-			{				
-				vertex_touched[cell->vertex_index(v)] = true;				
-				int dof_number = cell->vertex_dof_index(v, 0);
-				
-				printf(hanging_dofs[dof_number] ? "true\n" : "false\n");
-				if (hanging_dofs[dof_number] == false)
-				{
-					cell->vertex(v) = update_vertex(cell->vertex(v));
-				}
-			}
-		}
-	}
-	
-	if (verbose)
-	{
-		std::ofstream out("new_grid.eps");
-		GridOut grid_out;
-		grid_out.write_eps(mesh, out);
-		
-		printf("done\n");
-	}
-}
-
-template<int dim>
-Point<dim> DarcyFlow<dim>::update_vertex(Point<dim> old_vertex)
-{
-		double x_0 = 0;		
-		double x_1 = std::numeric_limits<double>::infinity(); 
-		double y_0, y_1;
-		
-		prm.enter_subsection("Geometry");
-		double initial_height = prm.get_double("initial height");
-		prm.leave_subsection();
-	
-		for(typename std::map<Point<dim>, double, PointComparator>::iterator 
-						ii=new_domain_heights.begin(); ii!=new_domain_heights.end(); ++ii)
-		{
-			Point<dim> test_point = (*ii).first;
-			if (test_point[0] >= x_0 && test_point[0] <= old_vertex[0])
-			{
-				x_0 = test_point[0];
-				y_0 = (*ii).second;
-			}
-			else if (test_point[0] < x_1 && test_point[0] > old_vertex[0])
-			{
-				x_1 = test_point[0];
-				y_1 = (*ii).second;
-			}
-		}
-		
-		double y_bar = y_0 + (old_vertex[0] - x_0)*((y_1-y_0)/(x_1-x_0));
-		Point<dim> new_vertex;
-		new_vertex[0] = old_vertex[0];	
-		new_vertex[1] = y_bar*old_vertex[1]/initial_height;	
-		
-		return new_vertex;
-}
-
-template<int dim>
-void DarcyFlow<dim>::calculate_new_top_values()
-{
-	prm.enter_subsection("Geometry");
-	double initial_height = prm.get_double("initial height");
-	prm.leave_subsection();
-		
-	std::vector<bool> vertex_touched (mesh.n_vertices(), false);
-	typename DoFHandler<dim>::active_cell_iterator  
-			cell = dof_handler.begin_active(), endc = dof_handler.end();
-			
-	for (; cell!=endc; ++cell)
-	{
-		for (int v=0; v<GeometryInfo<dim>::vertices_per_cell; v++)
-		{
-			if (vertex_touched[cell->vertex_index(v)] == false)
-			{
-				Point<dim> vertex = cell->vertex(v);
-				
-				if (fabs(vertex[1] - initial_height) < 1e-8)
-				{
-					vertex_touched[cell->vertex_index(v)] = true;
-					new_domain_heights[cell->vertex(v)] = calculate_new_height();
-				}
-			}
-		}
-	}
-}
-
-template<int dim>
-double DarcyFlow<dim>::calculate_new_height()
-{
-	prm.enter_subsection("Geometry");
-	double initial_height = prm.get_double("initial height");
-	prm.leave_subsection();
-
-	return initial_height + 0.1*(rand()/((double)RAND_MAX) - 0.5);
-}
-
-template<int dim>
 void DarcyFlow<dim>::output_results(int cycle)
 {	
 	std::vector<std::string> solution_names (2, "velocity");
@@ -562,7 +417,7 @@ void DarcyFlow<dim>::output_results(int cycle)
 	data_out.add_data_vector(solution, solution_names, DataOut<2>::type_dof_data,
 			data_component_interpretation);
 			
-	data_out.build_patches ();
+	data_out.build_patches (2);
 	std::ostringstream filename;
 	
 	prm.enter_subsection("Output options");
@@ -597,7 +452,7 @@ void DarcyFlow<dim>::calculate_error(int cycle)
 										QGauss<dim>(3),
 										VectorTools::H1_seminorm,
 										&velocity_mask);
-	const double H1_error_velocity = difference_per_cell.l2_norm();
+	const double Hdiv_error_velocity = difference_per_cell.l2_norm();
 
 	const QTrapez<1> q_trapez;
 	const QIterated<dim> q_iterated (q_trapez, 5);
@@ -643,7 +498,7 @@ void DarcyFlow<dim>::calculate_error(int cycle)
 	velocity_convergence_table.add_value("cells", mesh.n_active_cells());
 	velocity_convergence_table.add_value("dofs", dof_handler.n_dofs());
 	velocity_convergence_table.add_value("L2", L2_error_velocity);
-	velocity_convergence_table.add_value("H1", H1_error_velocity);
+	velocity_convergence_table.add_value("H div", Hdiv_error_velocity);
 	velocity_convergence_table.add_value("Linfty", Linfty_error_velocity);
 	
 	pressure_convergence_table.add_value("cycle", cycle);
@@ -659,8 +514,6 @@ void DarcyFlow<dim>::run()
 {
 	read_inputs(); 
 	prm.print_parameters (std::cout, ParameterHandler::Text);
-
-	pressure_induced = prm.get_bool("pressure induced");
 	
 	prm.enter_subsection("Output options");
 	verbose = prm.get_bool("verbose");
@@ -679,7 +532,7 @@ void DarcyFlow<dim>::run()
 		
 		prm.enter_subsection("Geometry");
 		double dx = prm.get_double("length")/(double) (prm.get_integer("nx")-1);	
-		double dy = prm.get_double("initial height")/(double) (prm.get_integer("ny")-1);
+		double dy = prm.get_double("height")/(double) (prm.get_integer("ny")-1);
 		prm.leave_subsection();	  
 		  
 		for (int cycle = 0; cycle <= nc; cycle++)
@@ -728,7 +581,6 @@ void DarcyFlow<dim>::run()
 			output_results(cycle);
 		}
 		
-		move_mesh();
 		assemble();
 		solve();
 		output_results(nc+1);
@@ -739,14 +591,14 @@ template<int dim>
 void DarcyFlow<dim>::print_errors()
 {
 	velocity_convergence_table.set_precision("L2", 3);
-	velocity_convergence_table.set_precision("H1", 3);
+	velocity_convergence_table.set_precision("H div", 3);
 	velocity_convergence_table.set_precision("Linfty", 3);
 	velocity_convergence_table.set_scientific("L2", true);
-	velocity_convergence_table.set_scientific("H1", true);
+	velocity_convergence_table.set_scientific("H div", true);
 	velocity_convergence_table.set_scientific("Linfty", true);
 	
 	velocity_convergence_table.evaluate_convergence_rates("L2", ConvergenceTable::reduction_rate_log2);
-	velocity_convergence_table.evaluate_convergence_rates("H1", ConvergenceTable::reduction_rate_log2);
+	velocity_convergence_table.evaluate_convergence_rates("H div", ConvergenceTable::reduction_rate_log2);
 
 	pressure_convergence_table.set_precision("L2", 3);
 	pressure_convergence_table.set_precision("H1", 3);
@@ -771,17 +623,17 @@ int main ()
 {
 	const int dim = 2;
 	
-	DarcyFlow<dim> stokes_problem;
-	/*ExactSolutionForcingFunction<dim>  ff;
+	DarcyFlow<dim> darcy_problem;
+	ExactSolutionForcingFunction<dim>  ff;
 	ExactSolutionBoundaryValues<dim>   bv;
-	ExactSolution<dim>            ex;*/
+	ExactSolution<dim>            ex;
 	
-	MyZeroFunction<dim>  ff;
-	MyZeroFunction<dim>   bv;
-	ExactSolutionPressureDriven<dim>            ex;
+	//MyZeroFunction<dim>  ff;
+	//NoThroughBoundaryValues<dim>   bv;
 	
-	stokes_problem.forcing_function   = &ff;
-	stokes_problem.boundary_values    = &bv;
-	stokes_problem.exact_solution     = &ex;
-    stokes_problem.run();
+	
+	darcy_problem.forcing_function   = &ff;
+	darcy_problem.boundary_values    = &bv;
+	darcy_problem.exact_solution     = &ex;
+    darcy_problem.run();
 }
