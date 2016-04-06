@@ -25,15 +25,17 @@ class NavierStokesSolver
 	private:
         void read_inputs();
 		void setup_geometry(int cycle);
-		void assemble_system(double nu);
-		void assemble_mass_matrix();
+		void assemble_system(double nu, double theta, double t);
 		void solve();
 		void run_time_loop();
 		void refine_grid();
 		void output_results(int cycle);
         void calculate_error(int cycle, double t);  
-        void print_errors();      
+        void print_errors();  
+        void calculate_lift_and_drag(double t); 
         
+        FILE *pFile;
+   
 		struct InputFile
         {
             int          nx, ny, tpa, mina, maxa;
@@ -43,14 +45,17 @@ class NavierStokesSolver
         };
         
         ParameterHandler 	   prm;   
-        InputFile              input;        
+        InputFile              input;  
+        Triangulation<dim>	   mesh_hole;
+        Triangulation<dim>     mesh_rectangle; 
+        Triangulation<dim>	   mesh_top1;  
+        Triangulation<dim>	   mesh_top2;   
 		Triangulation<dim>     mesh;
 		FESystem<dim>          fe;
 		DoFHandler<dim>        dof_handler;
 		
 		ConstraintMatrix       constraints; 
 		SparsityPattern        sparsity_pattern;
-		SparseMatrix<double>   mass_matrix;
 		SparseMatrix<double>   system_matrix;
 		SparseMatrix<double>   system_matrix_copy;
 		Vector<double>         system_rhs;
@@ -58,6 +63,8 @@ class NavierStokesSolver
 		Vector<double>         old_solution;
 		Vector<double> 		   previous_newton_step;
 
+		std::vector<double> 		   drags;
+		
 		ConvergenceTable	   velocity_convergence_table;
 		ConvergenceTable	   pressure_convergence_table;
 };
@@ -209,6 +216,8 @@ void NavierStokesSolver<dim>::setup_geometry (int cycle)
 			grid_in.attach_triangulation(mesh);
 			std::ifstream input_file(input.gmesh_file.c_str());
 			grid_in.read_msh(input_file); 
+			
+			mesh.refine_global(2);
 		}
 		else
 		{
@@ -248,7 +257,8 @@ void NavierStokesSolver<dim>::setup_geometry (int cycle)
     //set boundary labels:
     // (1) : inlet
     // (2) : outlet
-    // (3) : everything else
+    // (3) : top and bottom
+    // (4) : everything else
 	for (; cell!=endc; ++cell)
 	{
 		for (int f=0; f<GeometryInfo<dim>::faces_per_cell; f++)
@@ -263,9 +273,14 @@ void NavierStokesSolver<dim>::setup_geometry (int cycle)
 				{
 					cell->face(f)->set_boundary_indicator(2);
 				}
-				else
+				else if ((fabs(cell->face(f)->center()[1] - input.domain_height) < 1e-8) || 	
+						 (fabs(cell->face(f)->center()[1]) < 1e-8))
 				{
 					cell->face(f)->set_boundary_indicator(3);
+				}						 
+				else
+				{
+					cell->face(f)->set_boundary_indicator(4);
 				}
 			}
 		}
@@ -279,6 +294,9 @@ void NavierStokesSolver<dim>::setup_geometry (int cycle)
 		FEValuesExtractors::Scalar velocity_y(1);
 		
 		VectorTools::interpolate_boundary_values(dof_handler, 3, 
+				*boundary_values, constraints, fe.component_mask(velocities));
+				
+		VectorTools::interpolate_boundary_values(dof_handler, 4, 
 				*boundary_values, constraints, fe.component_mask(velocities));
 						
 		VectorTools::interpolate_boundary_values(dof_handler, 1, 
@@ -307,6 +325,8 @@ void NavierStokesSolver<dim>::setup_geometry (int cycle)
 		VectorTools::interpolate_boundary_values(dof_handler, 3, 
 				*boundary_values, constraints, fe.component_mask(velocities));
 
+		VectorTools::interpolate_boundary_values(dof_handler, 4, 
+				*boundary_values, constraints, fe.component_mask(velocities));
 					
 		//constrain first pressure dof to be 0
 		DoFTools::extract_boundary_dofs(dof_handler, fe.component_mask(pressure), 
@@ -328,7 +348,6 @@ void NavierStokesSolver<dim>::setup_geometry (int cycle)
     
     system_matrix.reinit(sparsity_pattern);
     system_matrix_copy.reinit(sparsity_pattern);
-    mass_matrix.reinit(sparsity_pattern);
     solution.reinit(dof_handler.n_dofs());     
     old_solution.reinit(dof_handler.n_dofs());
     system_rhs.reinit(dof_handler.n_dofs()); 
@@ -336,76 +355,7 @@ void NavierStokesSolver<dim>::setup_geometry (int cycle)
 }
 
 template<int dim>
-void NavierStokesSolver<dim>::assemble_mass_matrix()
-{
-	if (input.verbose)
-	{
-		printf("Assembling mass matrix...");
-	}
-	Timer timer;
-	timer.start ();
-
-    mass_matrix.reinit(sparsity_pattern);
-    
-	QGauss<dim>                 quadrature_formula(2);
-	
-	const int                   dofs_per_cell = fe.dofs_per_cell;
-    const int                   n_q_points = quadrature_formula.size();	
-	std::vector<Tensor<1,dim> > phi_u (dofs_per_cell); 
-
-	const FEValuesExtractors::Vector velocities (0);
-	
-    FullMatrix<double>          cell_mass (dofs_per_cell, dofs_per_cell);
-    
-    std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);    
-	
-    FEValues<dim> fe_values(fe, quadrature_formula, 
-            update_values | update_gradients | update_JxW_values | update_quadrature_points);   
-       
-    typename DoFHandler<dim>::active_cell_iterator  
-			cell = dof_handler.begin_active(), endc = dof_handler.end();
-    
-    for (; cell!=endc; ++cell)
-    {
-        fe_values.reinit(cell);
-        cell_mass = 0;
-		
-        //calculate cell contribution to system         
-        for (int q = 0; q < n_q_points; q++)
-        {
-			for (int k=0; k<dofs_per_cell; k++)
-			{
-				phi_u[k] = fe_values[velocities].value (k, q);
-			}
-			
-			for (int i = 0; i < dofs_per_cell; i++)
-			{
-				for (int j = 0; j < dofs_per_cell; j++)
-				{
-					cell_mass(i,j) += phi_u[i]*phi_u[j]*fe_values.JxW(q);
-				}
-			}
-		}
-		
-		cell->get_dof_indices(local_dof_indices);
-		for (int i = 0; i < dofs_per_cell; i++)
-		{
-			for (int j = 0; j < dofs_per_cell; j++)
-			{
-				 mass_matrix.add (local_dof_indices[i], local_dof_indices[j], cell_mass(i,j)); 
-			 }
-		 }        
-	}	
-    
-    timer.stop();
-    if (input.verbose)
-	{
-		printf("done (%gs)\n", timer());
-	}                        
-}
-
-template<int dim>
-void NavierStokesSolver<dim>::assemble_system(double nu)
+void NavierStokesSolver<dim>::assemble_system(double nu, double theta, double t)
 {
 	if (input.verbose)
 	{
@@ -416,7 +366,6 @@ void NavierStokesSolver<dim>::assemble_system(double nu)
 	
 	system_matrix.reinit(sparsity_pattern);    
     system_rhs.reinit(dof_handler.n_dofs());
-    mass_matrix.reinit(sparsity_pattern);
     
 	QGauss<dim>                 quadrature_formula(2);
 	QGauss<dim-1>               face_quadrature_formula(3);
@@ -427,8 +376,12 @@ void NavierStokesSolver<dim>::assemble_system(double nu)
 	
 	std::vector<Tensor<1,dim> > previous_newton_velocity_values(n_q_points);
 	std::vector<Tensor< 2, dim> > previous_newton_velocity_gradients(n_q_points);
+	std::vector<Tensor<1,dim> > previous_time_velocity_values(n_q_points);
+	std::vector<Tensor< 2, dim> > previous_time_velocity_gradients(n_q_points);
+	std::vector<double> previous_time_pressure_values(n_q_points);
 	
 	std::vector<Vector<double> > rhs_values (n_q_points, Vector<double>(dim+1));
+	std::vector<Vector<double> > rhs_values_old (n_q_points, Vector<double>(dim+1));
 	std::vector<Tensor<2,dim> > grad_phi_u (dofs_per_cell);
 	std::vector<double>         div_phi_u (dofs_per_cell);
 	std::vector<double>         phi_p (dofs_per_cell);
@@ -436,7 +389,6 @@ void NavierStokesSolver<dim>::assemble_system(double nu)
 	Vector<double>              cell_rhs(dofs_per_cell);
 	
 	FullMatrix<double>          cell_matrix (dofs_per_cell, dofs_per_cell);
-    FullMatrix<double>          cell_mass (dofs_per_cell, dofs_per_cell);
     
     std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);    
 	const FEValuesExtractors::Vector velocities (0);
@@ -454,7 +406,6 @@ void NavierStokesSolver<dim>::assemble_system(double nu)
     {
         fe_values.reinit(cell);
         cell_matrix = 0;
-        cell_mass = 0;
         cell_rhs = 0;
         
         /** Calculate velocity values and gradients from previous newton iteration
@@ -462,10 +413,18 @@ void NavierStokesSolver<dim>::assemble_system(double nu)
 		fe_values[velocities].get_function_values(previous_newton_step, previous_newton_velocity_values);        
 		fe_values[velocities].get_function_gradients(previous_newton_step, previous_newton_velocity_gradients);
 		
+		fe_values[velocities].get_function_values(old_solution, previous_time_velocity_values);        
+		fe_values[velocities].get_function_gradients(old_solution, previous_time_velocity_gradients);
+		fe_values[pressure].get_function_values(old_solution, previous_time_pressure_values);
+		
+		forcing_function->set_time(t - input.dt);
+		forcing_function->vector_value_list(fe_values.get_quadrature_points(), rhs_values_old);
+		
+		forcing_function->set_time(t);
 		forcing_function->vector_value_list(fe_values.get_quadrature_points(), rhs_values);
 		
         //calculate cell contribution to system         
-               for (int q = 0; q < n_q_points; q++)
+        for (int q = 0; q < n_q_points; q++)
         {
 			for (int k=0; k<dofs_per_cell; k++)
 			{
@@ -482,7 +441,7 @@ void NavierStokesSolver<dim>::assemble_system(double nu)
 					if (input.slit_flow)
 					{
 						cell_matrix(i,j) += 
-								(phi_u[j]*phi_u[i] + input.dt*(0.5*nu*
+								((1.0/input.dt)*phi_u[j]*phi_u[i] + theta*(0.5*nu*
 								double_contract(grad_phi_u[i] + transpose(grad_phi_u[i]),
 													grad_phi_u[j] + transpose(grad_phi_u[j]))
 										+ phi_u[j]*transpose(previous_newton_velocity_gradients[q])*phi_u[i]
@@ -494,22 +453,39 @@ void NavierStokesSolver<dim>::assemble_system(double nu)
 					else
 					{
 						cell_matrix(i,j) += 
-								(phi_u[j]*phi_u[i] + input.dt*(nu*double_contract(grad_phi_u[i],grad_phi_u[j])
-											+ phi_u[j]*transpose(previous_newton_velocity_gradients[q])*phi_u[i]
-											+ previous_newton_velocity_values[q]*transpose(grad_phi_u[j])*phi_u[i]
-											- phi_p[j]*div_phi_u[i])
-											- phi_p[i]*div_phi_u[j])
-										*fe_values.JxW(q);
+								(
+									phi_u[j]*phi_u[i] 
+									+ theta*input.dt*
+									(
+										nu*double_contract(grad_phi_u[i],grad_phi_u[j])
+										+ phi_u[j]*transpose(previous_newton_velocity_gradients[q])*phi_u[i]
+										+ previous_newton_velocity_values[q]*transpose(grad_phi_u[j])*phi_u[i]										
+									)
+									- input.dt*phi_p[j]*div_phi_u[i]
+									- phi_p[i]*div_phi_u[j]
+								)
+								*fe_values.JxW(q);
 					}
-					
-					cell_mass(i,j) += phi_u[i]*phi_u[j]*fe_values.JxW(q);
 				}
 				
 				int equation_i = fe.system_to_component_index(i).first;
 				
 				cell_rhs[i] += 
-							(fe_values.shape_value(i,q)*rhs_values[q](equation_i)
-							 + previous_newton_velocity_values[q]*transpose(previous_newton_velocity_gradients[q])*phi_u[i])
+							(
+								previous_time_velocity_values[q]*phi_u[i]
+								+ input.dt*
+								(
+									theta*fe_values.shape_value(i,q)*rhs_values[q](equation_i)
+									+ theta*previous_newton_velocity_values[q]*transpose(previous_newton_velocity_gradients[q])*phi_u[i]
+									+ (1-theta)*fe_values.shape_value(i,q)*rhs_values_old[q](equation_i)
+									- (1-theta)*
+									(
+										nu*double_contract(grad_phi_u[i],previous_time_velocity_gradients[q])
+										+ previous_time_velocity_values[q]*transpose(previous_time_velocity_gradients[q])*phi_u[i]
+										//- previous_time_pressure_values[q]*div_phi_u[i]
+									)
+								)
+							 )
 							*fe_values.JxW(q);
 			}
 		}
@@ -554,12 +530,11 @@ void NavierStokesSolver<dim>::assemble_system(double nu)
 		cell->get_dof_indices(local_dof_indices);
 		for (int i = 0; i < dofs_per_cell; i++)
 		{
-			system_rhs[local_dof_indices[i]] += input.dt*cell_rhs(i);
+			system_rhs[local_dof_indices[i]] += cell_rhs(i);
 			
 			for (int j = 0; j < dofs_per_cell; j++)
 			{
 				 system_matrix.add (local_dof_indices[i], local_dof_indices[j], cell_matrix(i,j));
-				 mass_matrix.add (local_dof_indices[i], local_dof_indices[j], cell_mass(i,j)); 
 			 }
 		 }        
 	}	
@@ -585,6 +560,15 @@ void NavierStokesSolver<dim>::solve()
 	A_direct.initialize(system_matrix_copy);
 
 	A_direct.vmult(solution, system_rhs);
+	/*SolverControl solver_control (4000, 1e-10);
+	SolverGMRES<>  solver (solver_control);
+	
+	PreconditionJacobi<> preconditioner;
+	preconditioner.initialize(system_matrix, 1.0);
+  
+	solver.solve (system_matrix_copy, solution, system_rhs,
+                 PreconditionIdentity());*/
+	
     constraints.distribute(solution);
     
     timer.stop ();
@@ -735,8 +719,6 @@ void NavierStokesSolver<dim>::run_time_loop()
 	VectorTools::interpolate(dof_handler, *initial_conditions, old_solution);
 	solution = old_solution;
 	
-	assemble_mass_matrix();
-	
 	if (input.refinement_type.compare("adaptive") == 0)
 	{
 		output_results(0);
@@ -745,18 +727,13 @@ void NavierStokesSolver<dim>::run_time_loop()
 	double t = input.t0;
 	double dt_tmp = input.dt;
 	int    timestep_number = 0;
-	int    n_adapts = 0;	
+	int    n_adapts = 0;
 	
 	Vector<double> tmp;	
 	tmp.reinit(solution.size());
 	
 	while (t < input.tf)
-	{	
-		/*if (timestep_number == 0)
-		{			
-			input.dt = 1e-2;
-		}*/
-		
+	{		
 		t += input.dt;
 		timestep_number++;
 		
@@ -765,7 +742,6 @@ void NavierStokesSolver<dim>::run_time_loop()
 			printf("Time step %i at t = %f\n", timestep_number, t);	
 		}		
 		
-		forcing_function->set_time(t);
 		boundary_values->set_time(t);
 				
 		constraints.clear();
@@ -779,6 +755,9 @@ void NavierStokesSolver<dim>::run_time_loop()
 			
 			FEValuesExtractors::Scalar velocity_y(1);
 			
+			VectorTools::interpolate_boundary_values(dof_handler, 4, 
+					*boundary_values, constraints, fe.component_mask(velocities));
+					
 			VectorTools::interpolate_boundary_values(dof_handler, 3, 
 					*boundary_values, constraints, fe.component_mask(velocities));
 							
@@ -806,7 +785,9 @@ void NavierStokesSolver<dim>::run_time_loop()
 			
 			VectorTools::interpolate_boundary_values(dof_handler, 3, 
 					*boundary_values, constraints, fe.component_mask(velocities));
-
+	
+			VectorTools::interpolate_boundary_values(dof_handler, 4, 
+					*boundary_values, constraints, fe.component_mask(velocities));
 						
 			//constrain first pressure dof to be 0
 			DoFTools::extract_boundary_dofs(dof_handler, fe.component_mask(pressure), 
@@ -826,16 +807,12 @@ void NavierStokesSolver<dim>::run_time_loop()
 		double residual = 0;
 		
 		previous_newton_step =  old_solution;
-		//assemble_system(input.nu);
-		
-		mass_matrix.vmult(tmp, old_solution); //tmp is contribution from previous time step
 		
 		printf("\nStarting Newton iteration for nu=%f\n", input.nu);
 		while (iter == 0 || (residual > 1e-12 && iter < MAX_ITER))
 		{
-			assemble_system(input.nu);
-			system_rhs.add(tmp); 
-			
+			assemble_system(input.nu, 0.5, t);
+
 			system_matrix_copy.copy_from(system_matrix);
 			constraints.condense(system_matrix_copy, system_rhs);
 			
@@ -856,10 +833,12 @@ void NavierStokesSolver<dim>::run_time_loop()
 		{
 			printf("WARNING: Newton's method failed to converge for nu=%f\n", input.nu);
 		}
+				
+		calculate_lift_and_drag(t);
 		
 		if (input.refinement_type.compare("adaptive") == 0)
 		{
-			output_results(timestep_number);
+			//output_results(timestep_number);
 			
 			/** Adapt if asked *********************************************************************/
 			if (timestep_number % input.tpa == 0)
@@ -872,7 +851,6 @@ void NavierStokesSolver<dim>::run_time_loop()
 				}
 				
 				tmp.reinit(solution.size());
-				assemble_mass_matrix();
 				n_adapts++;	
 			}
 		}
@@ -885,12 +863,14 @@ void NavierStokesSolver<dim>::run_time_loop()
 template<int dim>
 void NavierStokesSolver<dim>::run()
 {
-	read_inputs(); 
-	
+	read_inputs(); 	
+	pFile = fopen ("drag_data_fine_dt_theta_1.txt","w");
+	 
 	if (input.refinement_type.compare("uniform") == 0)
 	{
-		double h = 1.0/(double) (input.nx-1);	
-		input.dt = pow(h,3);  
+		double h = 1.0/(double) (input.nx-1);
+		//double h = GridTools::maximal_cell_diameter(mesh)
+		input.dt = pow(h,1);  
 		  
 		for (int cycle = 0; cycle <=input.maxa; cycle++)
 		{				
@@ -898,12 +878,12 @@ void NavierStokesSolver<dim>::run()
 			{
 				mesh.refine_global(1);
 				h        /= 2;
-				input.dt /= 8;	
+				input.dt = pow(h,1);
 			}
 			
 			if (input.verbose)
 			{
-				printf("Cycle %i\n h = %f, dt = %f\n", cycle, h, input.dt);	
+				printf("Cycle %i\n h = %g, dt = %g\n", cycle, h, input.dt);	
 			}
 			
 			setup_geometry(cycle);
@@ -923,6 +903,8 @@ void NavierStokesSolver<dim>::run()
 	{
 		print_errors();	
 	}
+	
+	fclose (pFile);
 }
 
 template<int dim>
@@ -957,15 +939,95 @@ void NavierStokesSolver<dim>::print_errors()
 	pressure_convergence_table.write_text(std::cout);
 }
 
+template<int dim>
+void NavierStokesSolver<dim>::calculate_lift_and_drag(double t)
+{
+	QGauss<dim-1>               face_quadrature_formula(3);
+	const int                   n_q_points = face_quadrature_formula.size();
+	
+	const FEValuesExtractors::Vector velocities (0);
+	const FEValuesExtractors::Scalar pressure (dim);
+	
+	std::vector<double>     pressure_values(n_q_points);
+	std::vector<Tensor< 2, dim> > velocity_gradients(n_q_points);
+	
+	
+	Tensor<1,dim>    grad_u_tau;	 
+	Tensor<1,dim>    normal_vector; 
+	Tensor<1,dim>    tangent_vector; 
+	
+	Tensor<2,dim>    fluid_stress;
+	Tensor<2,dim>    fluid_pressure;
+	Tensor<1,dim>    forces;
+	
+	FEFaceValues<dim> fe_face_values (fe, face_quadrature_formula, update_values 
+			| update_quadrature_points | update_gradients | update_JxW_values | update_normal_vectors ); 
+	
+	typename DoFHandler<dim>::active_cell_iterator  
+			cell = dof_handler.begin_active(), endc = dof_handler.end();
+	
+	double drag = 0;
+	double lift = 0;
+			
+	for (; cell!=endc; ++cell)
+    {
+		for (int face=0; face < GeometryInfo<dim>::faces_per_cell; face++)
+		{						
+			if (cell->face(face)->at_boundary())
+			{
+				fe_face_values.reinit (cell, face);
+				std::vector<Point<dim> > q_points = fe_face_values.get_quadrature_points();
+				
+				if (cell->face(face)->boundary_indicator() == 4)
+				{	
+					fe_face_values[velocities].get_function_gradients(solution, velocity_gradients);
+					fe_face_values[pressure].get_function_values(solution, pressure_values);
+							
+					for (int q = 0; q < n_q_points; q++)
+					{						
+						normal_vector = -fe_face_values.normal_vector(q);
+						
+						fluid_pressure[0][0] = pressure_values[q];
+						fluid_pressure[1][1] = pressure_values[q];
+						 
+						fluid_stress = input.nu*velocity_gradients[q] - fluid_pressure;
+						
+						forces = fluid_stress*normal_vector*fe_face_values.JxW(q);
+						
+						drag += forces[0];
+						lift += forces[1];						
+					}
+				}
+			}
+		}
+	}
+	
+	//calculate pressure drop
+	Point<dim> p1, p2;
+	p1[0] = 0.15;
+	p1[1] = 0.2;
+	p2[0] = 0.25;
+	p2[1] = 0.2;
+	Vector<double> solution_values1(dim+1);
+	Vector<double> solution_values2(dim+1);
+	
+	VectorTools::point_value(dof_handler, solution, p1, solution_values1);
+	VectorTools::point_value(dof_handler, solution, p2, solution_values2);
+	
+	double p_diff = solution_values1(dim) - solution_values2(dim);
+	fprintf (pFile, "%f, %f,  %f, %f\n", t, 20.0*drag, 20.0*lift, p_diff);
+	fflush (pFile);	
+}
+
 int main ()
 {
 	const int dim = 2;
 	
 	NavierStokesSolver<dim> navier_stokes_problem;
 	
-	DrivenCavityBoundaryValues<dim>    bv;
+	//DrivenCavityBoundaryValues<dim>    bv;
 	//InflowBoundaryValues<dim>                bv;
-	//PeriodicBoundaryValues<dim>                bv;
+	PeriodicBoundaryValues<dim>                bv;
 	//RotatingCircleForcingFunction<dim> ff;
 	//MyZeroFunction<dim>                bv;
 	MyZeroFunction<dim>                ff;
