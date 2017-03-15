@@ -1,0 +1,29 @@
+# Listing of Parameters
+# ---------------------
+subsection Problem setup
+  # degree of basis functions
+  set basis degree = 3
+  set mapping order = 3 
+end
+
+subsection Output options
+  # name of the output file (without extension)
+  set output name  = poisson
+
+  # print errors to console. If exact solution known and in myfunctions.h,
+  # print L2 and H1 errors. For uniform mesh refinement this is essentially a
+  # convergence study. For adaptive mesh refinement, errors are calcualated
+  # after each adpat.
+  set print errors = true
+
+  # verbose output to console during solve
+  set verbose      = true
+end
+
+
+subsection Run options
+  # refienment steps
+  set refinement steps = 6 
+end
+
+
